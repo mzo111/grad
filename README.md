@@ -27,6 +27,7 @@ examples/mnist.py    MLP on MNIST
 experiments/inside_outside.py  the autodiff-equals-outside identities
 experiments/recover.py         recover a known grammar by gradient descent
 experiments/bench.py           vectorized vs naive vs PyTorch
+experiments/gradcheck_report.py how many gradchecks ran, and the worst error
 ```
 
 ## Quickstart
@@ -34,6 +35,7 @@ experiments/bench.py           vectorized vs naive vs PyTorch
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/python -m pytest -q                    # 282 tests, incl. 156 gradchecks
+.venv/bin/python -m experiments.gradcheck_report # worst gradcheck error, 1.666e-09
 .venv/bin/python -m experiments.inside_outside   # the three identities, max error ~7e-15
 .venv/bin/python -m experiments.recover          # KL 3.2381 -> 1.6541, ~5 s
 .venv/bin/python examples/mnist.py               # 97.84% test accuracy, ~17 s
@@ -73,11 +75,24 @@ cotangent** before differencing, so the check covers the whole Jacobian rather t
 row sums — a rule that is wrong in a way that cancels under a uniform cotangent still fails.
 
 The suite runs **156 gradchecks** across ops, layers, losses and the grammar. The worst error
-observed over all of them is **1.67e-09** — about 600× inside the tolerance:
+observed over all of them is **1.666e-09** — about 600× inside the tolerance. `pytest` only
+asserts the bound; the number itself comes from a reporter that records every `check_grad`
+call and summarizes the run:
 
 ```
-.venv/bin/python -m pytest -q      # 282 passed
+.venv/bin/python -m pytest -q                        # 282 passed
+.venv/bin/python -m experiments.gradcheck_report     # the 156 / 1.666e-09 below
 ```
+
+```
+gradcheck calls:  156
+tolerance:        1e-06   (central differences, eps 1e-6, random cotangent)
+worst error:      1.666e-09   (600x inside the tolerance)
+worst case:       tests/test_ops.py::test_python_scalar_and_numpy_operands[<lambda>8]
+```
+
+Every seed is fixed, so the figure is stable run to run. It is reported, not targeted: if it
+moves, that is a result about the engine or the platform rather than something to tune away.
 
 The grammar has two independent references beyond finite differences: `grammar/naive.py`
 recomputes the inside chart with an explicit loop per cell, and `grammar/enumerate.py`

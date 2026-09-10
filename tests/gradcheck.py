@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 
 import numpy as np
@@ -9,6 +10,18 @@ import numpy as np
 from grad import Tensor
 
 TOL = 1e-6
+
+# Every call appends ``(test id, error)`` here, so a whole suite run can be summarized
+# afterwards by experiments/gradcheck_report.py. Recording is unconditional and costs one
+# tuple per call: making it opt-in would mean the reporter had to patch this module before
+# the test modules imported ``check_grad`` from it, and would report nothing if that
+# ordering ever changed. Nothing reads this during an ordinary test run.
+OBSERVED: list[tuple[str, float]] = []
+
+
+def _current_test() -> str:
+    """The running test's id, which pytest publishes in the environment."""
+    return os.environ.get("PYTEST_CURRENT_TEST", "<not under pytest>").split(" (")[0]
 
 
 def check_grad(
@@ -48,4 +61,5 @@ def check_grad(
             minus[i][idx] -= eps
             numeric[idx] = (scalar_fn(*plus) - scalar_fn(*minus)) / (2 * eps)
         worst = max(worst, float(np.abs(t.grad - numeric).max()))
+    OBSERVED.append((_current_test(), worst))
     return worst
