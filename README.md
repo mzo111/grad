@@ -36,11 +36,11 @@ experiments/gradcheck_report.py how many gradchecks ran, and the worst error
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/python -m pytest -q                    # 282 tests, incl. 156 gradchecks
-.venv/bin/python -m experiments.gradcheck_report # worst gradcheck error, 1.666e-09
+.venv/bin/python -m experiments.gradcheck_report # re-runs the suite; worst error 1.666e-09
 .venv/bin/python -m experiments.inside_outside   # the three identities, max error ~7e-15
 .venv/bin/python -m experiments.recover          # KL 3.2381 -> 1.6541, ~5 s
-.venv/bin/python examples/mnist.py               # 97.84% test accuracy, ~17 s
-.venv/bin/python -m experiments.bench            # the benchmark table
+.venv/bin/python examples/mnist.py               # 97.84% test accuracy
+.venv/bin/python -m experiments.bench            # the benchmark table and its ratios
 ```
 
 MNIST downloads itself into `data/mnist` (~12 MB, gitignored) on first run. The benchmark's
@@ -85,6 +85,12 @@ call and summarizes the run:
 .venv/bin/python -m experiments.gradcheck_report     # the 156 / 1.666e-09 below
 ```
 
+The reporter is not a lookup: it **runs the whole 282-test suite in-process** and collects the
+error from every `check_grad` call as it happens, which is the only way to see errors that the
+assertions throw away. It therefore costs whatever the suite costs — about 0.45 s here,
+indistinguishable from `pytest -q` itself, but it scales with the suite rather than with the
+156 checks. It refuses to report if the suite fails or if no calls were recorded.
+
 ```
 gradcheck calls:  156
 tolerance:        1e-06   (central differences, eps 1e-6, random cotangent)
@@ -105,18 +111,26 @@ are asserted against the vectorized implementation in `tests/test_grammar.py`.
 A 784 → 256 → 10 MLP, ReLU, Adam at `lr=1e-3`, batch 128, 5 epochs, seed 0, on the standard
 normalization (`mean 0.1307`, `std 0.3081`).
 
-| epoch | train loss | test accuracy | time |
-|---:|---:|---:|---:|
-| 1 | 0.2447 | 95.96% | 3.7 s |
-| 2 | 0.0985 | 96.69% | 3.0 s |
-| 3 | 0.0655 | 97.60% | 3.6 s |
-| 4 | 0.0459 | 97.87% | 3.2 s |
-| 5 | 0.0349 | **97.84%** | 3.1 s |
+| epoch | train loss | test accuracy |
+|---:|---:|---:|
+| 1 | 0.2447 | 95.96% |
+| 2 | 0.0985 | 96.69% |
+| 3 | 0.0655 | 97.60% |
+| 4 | 0.0459 | 97.87% |
+| 5 | 0.0349 | **97.84%** |
 
-**97.84% final test accuracy in 16.6 s of training.** Accuracy peaked at epoch 4 (97.87%) and
-the reported figure is the final epoch, not the best one. This is an ordinary number for this
-architecture — a plain MLP on MNIST is a solved problem, and the result is here to show the
-engine trains a real model end to end, not because the accuracy is interesting.
+**97.84% final test accuracy.** Every figure in that table is exact and reproduces run to run:
+the seed is fixed, so the losses and accuracies come back identical. Accuracy peaked at epoch
+4 (97.87%) and the reported figure is the final epoch, not the best one. This is an ordinary
+number for this architecture — a plain MLP on MNIST is a solved problem, and the result is
+here to show the engine trains a real model end to end, not because the accuracy is
+interesting.
+
+**Training time is not quoted here, because it does not reproduce.** Four measurements across
+runs and machines span 8.6 s, 11.1 s, 15.9 s and 16.6 s — a factor of about two, with no
+change to the model, the data or the seed. It is seconds rather than minutes, and that is as
+precise as this repo can honestly be about it. The per-epoch times are gone from the table
+for the same reason; what the table is for is the loss and accuracy, which are exact.
 
 ## PCFG: inside-outside falls out of the backward pass
 
@@ -223,21 +237,35 @@ the measurement, so a ratio of two such numbers describes the clock.
 | (4, 20, 8, 12) | 10.6× | 2.52× | 2.9× |
 | (2, 30, 6, 10) | 11.0× | 2.33× | 2.2× |
 
-Three things to read off it:
+Both tables are **one run**. The ratios are derived from that run's own wall-clock timings,
+so their endpoints move whenever the timings do — the per-shape cells above and the ranges
+below are not stable quantities, and quoting either to three significant figures would be
+false precision. Across four runs of this benchmark, on this machine and on a fresh clone:
 
-- **Vectorizing the chart is worth 10.6× to 11.6×** — 0.015 s against 0.167 s at
-  `(8, 16, 8, 12)`, forward only. That is the gap between filling the chart cell by cell in
-  Python and filling a whole diagonal with array ops.
-- **Forward+backward costs 2.33× to 2.59× forward alone**, so the backward pass is a little
-  more expensive than the forward — the expected shape for reverse mode.
-- **PyTorch is 2.2× to 4.0× faster on forward+backward**, widest at `(8, 16, 8, 12)` and
-  narrowest at the largest shape. The engine's overhead is per-op Python dispatch, so it
-  amortizes as the arrays get bigger. It is behind, and it is not embarrassed.
+| | run A | run B | run C | run D | **taken together** |
+|---|---|---|---|---|---|
+| naive / engine fwd | 9.8–11.2× | 10.6–11.6× | 9.0–10.6× | 10.1–11.8× | **roughly 9–12×** |
+| fwd+bwd / fwd | 2.25–2.50× | 2.33–2.59× | 1.92–2.47× | 2.31–2.58× | **roughly 2–2.6×** |
+| engine / torch fwd+bwd | 2.3–4.4× | 2.2–4.0× | — | 1.9–3.3× | **roughly 2–4×** |
 
-**These ratios move between runs.** An earlier run of the same benchmark on the same machine
-gave 9.8×–11.2×, 2.25×–2.50× and 2.3×–4.4× for the three lines above. Every range overlaps
-its counterpart and no conclusion changes, but a single ratio quoted to two significant
-figures is over-stating what this measures.
+Three things to read off it, at the precision the spread supports:
+
+- **Vectorizing the chart is worth roughly an order of magnitude** — about 9–12× forward-only,
+  0.015 s against 0.167 s at `(8, 16, 8, 12)` in the run above. That is the gap between
+  filling the chart cell by cell in Python and filling a whole diagonal with array ops, and it
+  is the one ratio here big enough that run-to-run noise cannot touch the conclusion.
+- **Forward+backward costs roughly 2 to 2.6× forward alone**, so the backward pass is a little
+  more expensive than the forward — the expected shape for reverse mode. The bottom of that
+  range comes from the fresh-clone run; a single run typically spans a much narrower band than
+  the four together do, which is exactly why a single run's band should not be quoted as the
+  answer.
+- **PyTorch is roughly 2 to 4× faster on forward+backward.** The engine's overhead is per-op
+  Python dispatch, so it amortizes as the arrays get bigger; the widest gaps show up at the
+  middle shapes rather than the largest. It is behind, and it is not embarrassed.
+
+No conclusion changes across the four runs — every range overlaps every other — but the
+endpoints wander by more than a reader would guess from any single run's output, so treat the
+`bench.py` ranges as that run's, not the repo's.
 
 The benchmark also serves as a correctness check: it asserts the engine, the naive loop and
 the PyTorch implementation agree on `log Z` to `1e-10` at every shape, so a regression in any
