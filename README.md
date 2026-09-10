@@ -26,7 +26,8 @@ tests/gradcheck.py   central finite differences against a random cotangent
 examples/mnist.py    MLP on MNIST
 experiments/inside_outside.py  the autodiff-equals-outside identities
 experiments/recover.py         recover a known grammar by gradient descent
-experiments/bench.py           vectorized vs naive vs PyTorch
+experiments/bench.py           vectorized vs naive vs PyTorch, with derived ratios
+experiments/env.py             machine and library facts, collected during the run
 experiments/gradcheck_report.py how many gradchecks ran, and the worst error
 ```
 
@@ -187,29 +188,56 @@ Vectorized inside on the engine, against the unvectorized loop and against the i
 algorithm written in PyTorch ops. Best of 3 runs. Shapes are `(batch, sentence length,
 nonterminals, terminals)`.
 
-Measured on a 13th Gen Intel Core i7-13700KF (24 threads; torch used 12), NumPy 2.5.3,
-torch 2.14.0+cpu. **Both columns are CPU** — the CPU-only torch wheel is the honest reference
-for a NumPy engine, and the comparison would be meaningless against a GPU build.
+The machine is recorded by the run, not written here by hand — `experiments/env.py` collects
+it and `bench.py` prints it above the table:
+
+```
+13th Gen Intel(R) Core(TM) i7-13700KF, 24 logical cores, 15.5 GiB
+Linux-5.15.133.1-microsoft-standard-WSL2-x86_64-with-glibc2.39 (WSL2)
+python 3.12.3, numpy 2.5.3, OMP_NUM_THREADS=unset
+torch 2.14.0+cpu (CPU-only build, 12 threads, cuda_available=False)
+```
+
+**Both columns are CPU** — the CPU-only torch wheel is the honest reference for a NumPy
+engine, and the comparison would be meaningless against a GPU build. The thread counts are
+worth reading: torch takes 12 threads by default while NumPy's threading is set separately
+and `OMP_NUM_THREADS` is unset, so the two columns are not necessarily using the same amount
+of the machine.
 
 | (batch, n, N, V) | engine fwd | engine fwd+bwd | naive fwd | torch fwd+bwd |
 |---|---:|---:|---:|---:|
 | (1, 8, 4, 6) | 0.001 s | 0.001 s | 0.001 s | 0.001 s |
-| (8, 12, 6, 10) | 0.004 s | 0.009 s | 0.045 s | 0.003 s |
-| (8, 16, 8, 12) | 0.016 s | 0.040 s | 0.174 s | 0.009 s |
-| (4, 20, 8, 12) | 0.017 s | 0.039 s | 0.167 s | 0.013 s |
-| (2, 30, 6, 10) | 0.017 s | 0.041 s | 0.180 s | 0.018 s |
+| (8, 12, 6, 10) | 0.004 s | 0.010 s | 0.043 s | 0.004 s |
+| (8, 16, 8, 12) | 0.015 s | 0.037 s | 0.167 s | 0.009 s |
+| (4, 20, 8, 12) | 0.016 s | 0.039 s | 0.164 s | 0.013 s |
+| (2, 30, 6, 10) | 0.016 s | 0.038 s | 0.177 s | 0.017 s |
+
+`bench.py` computes the ratios too, rather than leaving them to be divided out by hand. The
+1 ms shape is dropped from them: at that duration the timer's resolution is a large part of
+the measurement, so a ratio of two such numbers describes the clock.
+
+| (batch, n, N, V) | naive/engine fwd | fwd+bwd / fwd | engine/torch fwd+bwd |
+|---|---:|---:|---:|
+| (8, 12, 6, 10) | 11.6× | 2.59× | 2.2× |
+| (8, 16, 8, 12) | 11.3× | 2.49× | 4.0× |
+| (4, 20, 8, 12) | 10.6× | 2.52× | 2.9× |
+| (2, 30, 6, 10) | 11.0× | 2.33× | 2.2× |
 
 Three things to read off it:
 
-- **Vectorizing the chart is worth about 10×** (9.8× to 11.2×) — 0.016 s against 0.174 s at
-  `(8, 16, 8, 12)`, forward only. That is the gap between filling the chart cell by cell in Python and filling
-  a whole diagonal with array ops.
-- **Forward+backward costs about 2.4× forward alone** (2.25× to 2.50× across the four larger
-  shapes), so the backward pass is a little more expensive than the forward — the expected
-  shape for reverse mode.
-- **PyTorch is 2.3× to 4.4× faster on forward+backward, and the gap closes as the problem
-  grows**: 4.4× at `(8, 16, 8, 12)` down to 2.3× at `(2, 30, 6, 10)`. The engine's overhead is per-op Python
-  dispatch, so it amortizes as the arrays get bigger. It is behind, and it is not embarrassed.
+- **Vectorizing the chart is worth 10.6× to 11.6×** — 0.015 s against 0.167 s at
+  `(8, 16, 8, 12)`, forward only. That is the gap between filling the chart cell by cell in
+  Python and filling a whole diagonal with array ops.
+- **Forward+backward costs 2.33× to 2.59× forward alone**, so the backward pass is a little
+  more expensive than the forward — the expected shape for reverse mode.
+- **PyTorch is 2.2× to 4.0× faster on forward+backward**, widest at `(8, 16, 8, 12)` and
+  narrowest at the largest shape. The engine's overhead is per-op Python dispatch, so it
+  amortizes as the arrays get bigger. It is behind, and it is not embarrassed.
+
+**These ratios move between runs.** An earlier run of the same benchmark on the same machine
+gave 9.8×–11.2×, 2.25×–2.50× and 2.3×–4.4× for the three lines above. Every range overlaps
+its counterpart and no conclusion changes, but a single ratio quoted to two significant
+figures is over-stating what this measures.
 
 The benchmark also serves as a correctness check: it asserts the engine, the naive loop and
 the PyTorch implementation agree on `log Z` to `1e-10` at every shape, so a regression in any

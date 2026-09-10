@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from experiments import env  # noqa: E402
 from grammar import PCFG, inside  # noqa: E402
 from grammar.naive import log_z_naive  # noqa: E402
 
@@ -58,7 +59,9 @@ def inside_torch(log_binary, log_terminal, sentences):
     return chart[n][:, 0, 0], (lb, lt)
 
 
-def run_shape(shape: tuple[int, int, int, int], rng: np.random.Generator, has_torch: bool) -> str:
+def run_shape(
+    shape: tuple[int, int, int, int], rng: np.random.Generator, has_torch: bool
+) -> tuple[str, dict[str, float]]:
     batch, n, n_nt, n_t = shape
     g = PCFG.random(n_nt, n_t, rng)
     lb, lt = g.log_probs_numpy()
@@ -79,6 +82,7 @@ def run_shape(shape: tuple[int, int, int, int], rng: np.random.Generator, has_to
     t_fwd_bwd, log_z_2 = best_of(fwd_bwd)
     t_naive, z_naive = best_of(naive, repeats=1)
     assert np.allclose(log_z, z_naive, atol=1e-10) and np.allclose(log_z, log_z_2, atol=1e-10)
+    timings = {"fwd": t_fwd, "fwd_bwd": t_fwd_bwd, "naive": t_naive}
     row = f"{str(shape):>18} {t_fwd:>10.3f}s {t_fwd_bwd:>14.3f}s {t_naive:>10.3f}s"
     if has_torch:
 
@@ -90,11 +94,47 @@ def run_shape(shape: tuple[int, int, int, int], rng: np.random.Generator, has_to
         t_torch, z_torch = best_of(torch_fwd_bwd)
         assert np.allclose(log_z, z_torch, atol=1e-10)
         row += f" {t_torch:>13.3f}s"
-    return row
+        timings["torch_fwd_bwd"] = t_torch
+    return row, timings
+
+
+def format_ratios(rows: list[tuple[tuple[int, int, int, int], dict[str, float]]]) -> str:
+    """The comparisons the numbers are actually for, computed rather than left to the reader.
+
+    Sub-millisecond shapes are excluded: at 1 ms the timer's own resolution is a large part
+    of the measurement, and a ratio of two such numbers says more about the clock than about
+    the code.
+    """
+    usable = [(s, x) for s, x in rows if x["fwd"] >= 0.002]
+    if not usable:
+        return "no shape ran long enough to take a meaningful ratio"
+    lines = [
+        f"{'(batch, n, N, V)':>18} {'naive/engine fwd':>17} {'fwd+bwd / fwd':>15}"
+        f"{'  engine/torch fwd+bwd':>22}"
+    ]
+    for shape, x in usable:
+        torch_ratio = (
+            f"{x['fwd_bwd'] / x['torch_fwd_bwd']:>21.1f}x" if "torch_fwd_bwd" in x else f"{'-':>22}"
+        )
+        lines.append(
+            f"{str(shape):>18} {x['naive'] / x['fwd']:>16.1f}x {x['fwd_bwd'] / x['fwd']:>14.2f}x"
+            f"{torch_ratio}"
+        )
+    span = lambda f: (min(f(x) for _, x in usable), max(f(x) for _, x in usable))  # noqa: E731
+    lo, hi = span(lambda x: x["naive"] / x["fwd"])
+    lines.append(f"\nvectorizing the chart is worth {lo:.1f}x to {hi:.1f}x")
+    lo, hi = span(lambda x: x["fwd_bwd"] / x["fwd"])
+    lines.append(f"forward+backward costs {lo:.2f}x to {hi:.2f}x forward alone")
+    if all("torch_fwd_bwd" in x for _, x in usable):
+        lo, hi = span(lambda x: x["fwd_bwd"] / x["torch_fwd_bwd"])
+        lines.append(f"PyTorch is {lo:.1f}x to {hi:.1f}x faster on forward+backward")
+    return "\n".join(lines)
 
 
 def main() -> None:
     has_torch = importlib.util.find_spec("torch") is not None
+    print(env.render(env.collect()))
+    print()
     if not has_torch:
         print("torch not available: the PyTorch column is skipped")
     header = f"{'(batch, n, N, V)':>18} {'engine fwd':>11} {'engine fwd+bwd':>15} {'naive fwd':>11}"
@@ -102,8 +142,13 @@ def main() -> None:
         header += f" {'torch fwd+bwd':>14}"
     print(header)
     rng = np.random.default_rng(0)
+    rows = []
     for shape in SHAPES:
-        print(run_shape(shape, rng, has_torch))
+        row, timings = run_shape(shape, rng, has_torch)
+        print(row)
+        rows.append((shape, timings))
+    print()
+    print(format_ratios(rows))
 
 
 if __name__ == "__main__":
